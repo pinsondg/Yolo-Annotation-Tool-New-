@@ -7,15 +7,21 @@
 #
 #-------------------------------------------------------------------------------
 from __future__ import division
-from Tkinter import *
-import tkMessageBox
+from tkinter import *
+import tkinter.messagebox as tkMessageBox
 from PIL import Image, ImageTk
 import os
 import sys
 import glob
 import random
+import boto3
+import shutil
+from datetime import date
 
 MAIN_COLORS = ['darkolivegreen', 'darkseagreen', 'darkorange', 'darkslategrey', 'darkturquoise', 'darkgreen', 'darkviolet', 'darkgray', 'darkmagenta', 'darkblue', 'darkkhaki','darkcyan', 'darkred',  'darksalmon', 'darkslategray', 'darkgoldenrod', 'darkgrey', 'darkslateblue', 'darkorchid','skyblue','yellow','orange','red','pink','violet','green','brown','gold','Olive','Maroon', 'blue', 'cyan', 'black','olivedrab', 'lightcyan', 'silver']
+
+service = boto3.resource('s3')
+client = boto3.client('s3')
 
 # image sizes for the examples
 SIZE = 256, 256
@@ -23,13 +29,14 @@ SIZE = 256, 256
 classes = []
 
 try:
-    with open('classes.txt','r') as cls:
+    with open('classes.txt', 'r') as cls:
         classes = cls.readlines()
     classes = [cls.strip() for cls in classes]
 except IOError as io:
     print("[ERROR] Please create classes.txt and put your all classes")
     sys.exit(1)
 COLORS = random.sample(set(MAIN_COLORS), len(classes))
+
 
 class LabelTool():
     def __init__(self, master):
@@ -43,6 +50,9 @@ class LabelTool():
         self.frame.pack(fill=BOTH, expand=1)
         self.parent.resizable(width = FALSE, height = FALSE)
 
+        #s3 Stuff
+        self.allBuckets = client.list_buckets()['Buckets']
+
         # initialize global state
         self.imageDir = ''
         self.imageList= []
@@ -51,10 +61,11 @@ class LabelTool():
         self.outDir = ''
         self.cur = 0
         self.total = 0
-        self.category = 0
+        self.category = ''
         self.imagename = ''
         self.labelfilename = ''
         self.tkimg = None
+        self.loadFromS3 = True
 
         # initialize mouse state
         self.STATE = {}
@@ -71,9 +82,11 @@ class LabelTool():
 
         # ----------------- GUI stuff ---------------------
         # dir entry & load
-        self.label = Label(self.frame, text = "Image Dir:")
+        self.label = Label(self.frame, text = "Bucket Name:")
+        self.selectedBucket = StringVar(self.parent)
+        self.selectedBucket.set(self.allBuckets[0]['Name'])
         self.label.grid(row = 0, column = 0, sticky = E)
-        self.entry = Entry(self.frame)
+        self.entry = OptionMenu(self.frame, self.selectedBucket, *self.getBucketNames(self.allBuckets))
         self.entry.focus_set()
         self.entry.bind('<Return>', self.loadEntry)
         self.entry.grid(row = 0, column = 1, sticky = W+E)
@@ -140,26 +153,35 @@ class LabelTool():
         self.frame.columnconfigure(1, weight = 1)
         self.frame.rowconfigure(4, weight = 1)
 
-    def loadEntry(self,event):
+    def loadEntry(self, event):
         self.loadDir()
 
-    def loadDir(self, dbg = False):
-        if not dbg:
-            try:
-                s = self.entry.get()
-                self.parent.focus()
-                self.category = s
-            except ValueError as ve:
-                tkMessageBox.showerror("Error!", message = "The folder should be numbers")
-                return
-        if not os.path.isdir('./Images/%s' % self.category):
-           tkMessageBox.showerror("Error!", message = "The specified dir doesn't exist!")
-           return
+    def getBucketNames(self, buckets):
+        names = []
+        for bucket in buckets:
+            names.append(bucket["Name"])
+        return names
+
+
+
+    def downloadS3Folder(self, dirName):
+        bucket = service.Bucket(self.selectedBucket.get())
+        print("Looking in bucket: %s" %(bucket.name))
+        for object in bucket.objects.filter(Prefix=dirName):
+            newPath = object.key[object.key.rfind('/') + 1:];
+            print("Downloading file: %s to location %s" %(object.key, newPath))
+            bucket.download_file(object.key, './Images/' + object.key[object.key.rfind('/') + 1:])
+
+    def loadDir(self, dbg=False):
+
         # get image list
-        self.imageDir = os.path.join(r'./Images', '%s' %(self.category))
+        if self.loadFromS3:
+            self.downloadS3Folder("training/verified")
+            self.downloadS3Folder("training/false_positive")
+        self.imageDir = './Images'
         self.imageList = glob.glob(os.path.join(self.imageDir, '*.jpg'))
         if len(self.imageList) == 0:
-            print 'No .jpg images found in the specified dir!'
+            print ('No .jpg images found in the specified dir!')
             tkMessageBox.showerror("Error!", message = "No .jpg images found in the specified dir!")
             return
 
@@ -174,7 +196,7 @@ class LabelTool():
         if not os.path.exists(self.outDir):
             os.mkdir(self.outDir)
         self.loadImage()
-        print '%d images loaded from %s' %(self.total, s)
+        print ('%d images loaded from %s' %(self.total, s))
 
     def loadImage(self):
         # load image
@@ -207,7 +229,7 @@ class LabelTool():
                     self.bboxIdList.append(tmpId)
                     self.listbox.insert(END, '(%d, %d) -> (%d, %d) -> (%s)' %(tmp[0], tmp[1], tmp[2], tmp[3], classes[int(yolo_data[0])]))
                     self.listbox.itemconfig(len(self.bboxIdList) - 1, fg = COLORS[int(yolo_data[0])])
-        
+
     def saveImage(self):
         with open(self.labelfilename, 'w') as f:
             for bbox,bboxcls in zip(self.bboxList,self.bboxListCls):
@@ -215,7 +237,7 @@ class LabelTool():
                 b = (float(xmin), float(xmax), float(ymin), float(ymax))
                 bb = self.convert((self.curimg_w,self.curimg_h), b)
                 f.write(str(bboxcls) + " " + " ".join([str(a) for a in bb]) + '\n')
-        print 'Image No. %d saved' %(self.cur)
+        print ('Image No. %d saved' %(self.cur))
 
 
     def mouseClick(self, event):
@@ -290,7 +312,28 @@ class LabelTool():
             self.cur += 1
             self.loadImage()
         else:
-            tkMessageBox.showerror("Information!", message = "All images annotated")
+            answer = tkMessageBox.askyesno("Information!", message = "All images annotated! Would you like to do an automatic cleanup? Your files will be removed from s3 and the labels and images will be moved under the \"out/\" directory.")
+            print(answer)
+            if answer:
+                self.createOutDirAndMove()
+                self.deletes3Dir()
+
+    def createOutDirAndMove(self):
+        if not os.path.exists('./out'):
+            os.mkdir('./out')
+        today = date.today().strftime('%d-%m-%Y')
+        if not os.path.exists('./out/finalData-' + today):
+            os.mkdir('./out/finalData-' + today)
+        copytree('./Images', './out/finalData-' + today)
+        copytree('./Labels', './out/finalData-' + today)
+        deleteFilesInDir('./Labels')
+        deleteFilesInDir('./Images')
+
+    def deletes3Dir(self):
+        bucket = service.Bucket(self.selectedBucket.get())
+        print('Deleting files in bucket: %s and prefix: \'training/fasle_positive/\'' %(self.selectedBucket.get()))
+        bucket.objects.filter(Prefix="training/false_positive/").delete()
+        bucket.objects.filter(Prefix="training/verified/").delete()
 
     def gotoImage(self):
         idx = int(self.idxEntry.get())
@@ -329,8 +372,25 @@ class LabelTool():
         ymin = ymax-h
         return [int(xmin),int(ymin),int(xmax),int(ymax)]
 
+
+def copytree(src, dst, symlinks=False, ignore=None):
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dst, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks, ignore)
+        else:
+            shutil.copy2(s, d)
+
+
+def deleteFilesInDir(mydir):
+    filelist = [f for f in os.listdir(mydir)]
+    for f in filelist:
+        os.remove(os.path.join(mydir, f))
+
+
 if __name__ == '__main__':
     root = Tk()
     tool = LabelTool(root)
-    root.resizable(width =  True, height = True)
+    root.resizable(width=True, height=True)
     root.mainloop()
