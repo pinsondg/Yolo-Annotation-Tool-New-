@@ -90,8 +90,10 @@ class LabelTool():
         self.entry.focus_set()
         self.entry.bind('<Return>', self.loadEntry)
         self.entry.grid(row = 0, column = 1, sticky = W+E)
+        self.key_prefix_entry = Entry(self.frame, width=10)
+        self.key_prefix_entry.grid(row = 0, column = 2, sticky =W + E)
         self.ldBtn = Button(self.frame, text = "Load", command = self.loadDir)
-        self.ldBtn.grid(row = 0, column = 2, sticky = W+E)
+        self.ldBtn.grid(row = 0, column = 3, sticky = W+E)
 
         # main panel for labeling
         self.mainPanel = Canvas(self.frame, cursor='tcross')
@@ -125,6 +127,8 @@ class LabelTool():
         self.ctrPanel.grid(row = 6, column = 1, columnspan = 2, sticky = W+E)
         self.prevBtn = Button(self.ctrPanel, text='<< Prev', width = 10, command = self.prevImage)
         self.prevBtn.pack(side = LEFT, padx = 5, pady = 3)
+        self.deleteBtn = Button(self.ctrPanel, text='Delete', width = 10, command = self.deleteImage)
+        self.deleteBtn.pack(side = LEFT, padx = 5, pady = 3)
         self.nextBtn = Button(self.ctrPanel, text='Next >>', width = 10, command = self.nextImage)
         self.nextBtn.pack(side = LEFT, padx = 5, pady = 3)
         self.progLabel = Label(self.ctrPanel, text = "Progress:     /    ")
@@ -152,6 +156,8 @@ class LabelTool():
 
         self.frame.columnconfigure(1, weight = 1)
         self.frame.rowconfigure(4, weight = 1)
+        self.s3Keys = []
+        self.key_prefix = ""
 
     def loadEntry(self, event):
         self.loadDir()
@@ -162,24 +168,35 @@ class LabelTool():
             names.append(bucket["Name"])
         return names
 
-
+    def delete(self):
+        print('Delete')
+        imagepath = self.imageList[self.cur - 1]
+        for item in self.s3Keys:
+            if imagepath[imagepath.rfind('/') + 1:] in item:
+                print('Deleting: ' + item)
+                os.remove(imagepath)
+                obj = service.Object(self.selectedBucket.get(), item)
+                obj.delete()
 
     def downloadS3Folder(self, dirName):
         bucket = service.Bucket(self.selectedBucket.get())
         print("Looking in bucket: %s" %(bucket.name))
         for object in bucket.objects.filter(Prefix=dirName):
             newPath = object.key[object.key.rfind('/') + 1:];
+            self.s3Keys.append(object.key);
             print("Downloading file: %s to location %s" %(object.key, newPath))
             bucket.download_file(object.key, './Images/' + object.key[object.key.rfind('/') + 1:])
+        self.key_prefix = self.key_prefix_entry.get();
 
     def loadDir(self, dbg=False):
 
         # get image list
         if self.loadFromS3:
-            self.downloadS3Folder("training/verified")
-            self.downloadS3Folder("training/false_positive")
+            self.downloadS3Folder(self.key_prefix_entry.get())
         self.imageDir = './Images'
         self.imageList = glob.glob(os.path.join(self.imageDir, '*.jpg'))
+        self.imageList.extend(glob.glob(os.path.join(self.imageDir, '*.jpeg')))
+        self.imageList.extend(glob.glob(os.path.join(self.imageDir, '*.png')))
         if len(self.imageList) == 0:
             print ('No .jpg images found in the specified dir!')
             tkMessageBox.showerror("Error!", message = "No .jpg images found in the specified dir!")
@@ -202,6 +219,12 @@ class LabelTool():
         # load image
         imagepath = self.imageList[self.cur - 1]
         self.img = Image.open(imagepath)
+        size = self.img.size
+        print(size)
+        if size[0] > 1000 or size[1] > 800:
+            self.img.thumbnail((1000, 800))
+            self.img.save(imagepath)
+
         self.curimg_w, self.curimg_h = self.img.size
         self.tkimg = ImageTk.PhotoImage(self.img)
         self.mainPanel.config(width = max(self.tkimg.width(), 400), height = max(self.tkimg.height(), 400))
@@ -306,6 +329,18 @@ class LabelTool():
         else:
             tkMessageBox.showerror("Information!", message = "This is first image")
 
+    def deleteImage(self):
+        self.delete()
+        if self.cur < self.total:
+            self.cur += 1
+            self.loadImage()
+        else:
+            answer = tkMessageBox.askyesno("Information!", message = "All images annotated! Would you like to do an automatic cleanup? Your files will be removed from s3 and the labels and images will be moved under the \"out/\" directory.")
+            print(answer)
+            if answer:
+                self.createOutDirAndMove()
+                self.deletes3Dir()
+
     def nextImage(self, event = None):
         self.saveImage()
         if self.cur < self.total:
@@ -313,7 +348,6 @@ class LabelTool():
             self.loadImage()
         else:
             answer = tkMessageBox.askyesno("Information!", message = "All images annotated! Would you like to do an automatic cleanup? Your files will be removed from s3 and the labels and images will be moved under the \"out/\" directory.")
-            print(answer)
             if answer:
                 self.createOutDirAndMove()
                 self.deletes3Dir()
@@ -332,8 +366,8 @@ class LabelTool():
     def deletes3Dir(self):
         bucket = service.Bucket(self.selectedBucket.get())
         print('Deleting files in bucket: %s and prefix: \'training/fasle_positive/\'' %(self.selectedBucket.get()))
-        bucket.objects.filter(Prefix="training/false_positive/").delete()
-        bucket.objects.filter(Prefix="training/verified/").delete()
+        bucket.objects.filter(Prefix=self.key_prefix).delete()
+        print('Files deleted!')
 
     def gotoImage(self):
         idx = int(self.idxEntry.get())
